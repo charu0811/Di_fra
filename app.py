@@ -76,99 +76,84 @@ def load_and_clean_csv(file):
     return df
 
 
-def make_chart(df, title, shared_x=False):
-    fig = go.Figure()
+def make_chart(df, title):
+    # --- Create 2 rows: Price + Volatility
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.75, 0.25]
+    )
 
-    # Candles
-    if chart_mode in ["Candlestick + Close", "Candlestick Only"]:
-        fig.add_trace(go.Candlestick(
-            x=df["date"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            name="OHLC",
-            increasing_line_width=1,
-            decreasing_line_width=1
-        ))
+    # ---------------- PRICE CHART ----------------
+    fig.add_trace(go.Scatter(
+        x=df["date"],
+        y=df["close"],
+        mode="lines",
+        name="Close",
+        line=dict(width=2),
+        hovertemplate="Date=%{x}<br>Close=%{y}<extra></extra>"
+    ), row=1, col=1)
 
-    # Close line
-    if chart_mode in ["Candlestick + Close", "Close Line Only"]:
-        fig.add_trace(go.Scatter(
-            x=df["date"],
-            y=df["close"],
-            mode="lines",
-            name="Close",
-            line=dict(width=2)
-        ))
-
-    # Smoothed close
+    # Optional smoothing
     if rolling_window > 1:
         fig.add_trace(go.Scatter(
             x=df["date"],
             y=df["close_smooth"],
             mode="lines",
             name=f"Smooth({rolling_window})",
-            line=dict(width=2, dash="dot"),
-            opacity=0.9
-        ))
+            line=dict(width=1, dash="dot"),
+            opacity=0.8
+        ), row=1, col=1)
 
-    # Spike markers (Z-score)
+    # --- Spike detection markers (only a few points)
     spikes = df[np.abs(df["z"]) >= spike_threshold]
     if len(spikes) > 0:
         fig.add_trace(go.Scatter(
             x=spikes["date"],
             y=spikes["close"],
             mode="markers",
-            name=f"Z-Spikes ≥ {spike_threshold}",
-            marker=dict(size=10, symbol="x"),
-            hovertemplate="Spike<br>Date=%{x}<br>Close=%{y}<extra></extra>"
-        ))
+            name=f"Spikes (Z≥{spike_threshold})",
+            marker=dict(size=6, symbol="circle"),
+            hovertemplate="SPIKE<br>Date=%{x}<br>Close=%{y}<extra></extra>"
+        ), row=1, col=1)
 
-    # Big % jump markers
+    # --- Big % jump shading (clean highlight)
     jumps = df[np.abs(df["return"]) >= pct_jump_threshold]
-    if len(jumps) > 0:
-        fig.add_trace(go.Scatter(
-            x=jumps["date"],
-            y=jumps["close"],
-            mode="markers",
-            name=f"%Jump ≥ {pct_jump_threshold}%",
-            marker=dict(size=9, symbol="diamond"),
-            hovertemplate="Big Move<br>Date=%{x}<br>Close=%{y}<extra></extra>"
-        ))
+    for _, r in jumps.iterrows():
+        fig.add_vrect(
+            x0=r["date"],
+            x1=r["date"],
+            opacity=0.15,
+            line_width=0
+        )
 
-    # Volatility heat layer (fake volume style)
-    if show_volume_like:
-        fig.add_trace(go.Bar(
-            x=df["date"],
-            y=df["vol_heat"].fillna(0),
-            name="Vol Heat",
-            opacity=0.25,
-            hovertemplate="Vol Heat=%{y}<extra></extra>",
-            yaxis="y2"
-        ))
+    # ---------------- VOL HEAT PANEL ----------------
+    fig.add_trace(go.Scatter(
+        x=df["date"],
+        y=df["vol_heat"].fillna(0),
+        mode="lines",
+        name="Vol Heat",
+        line=dict(width=1),
+        opacity=0.9,
+        hovertemplate="Vol Heat=%{y}<extra></extra>"
+    ), row=2, col=1)
 
+    # ---------------- Layout polish ----------------
     fig.update_layout(
         title=title,
-        height=420,
+        height=520,
         margin=dict(l=10, r=10, t=50, b=10),
-        xaxis=dict(rangeslider=dict(visible=True)),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        xaxis=dict(rangeslider=dict(visible=False)),
     )
 
-    # secondary axis for vol heat
-    fig.update_layout(
-        yaxis2=dict(
-            overlaying="y",
-            side="right",
-            showgrid=False,
-            title="Vol Heat",
-            zeroline=False
-        )
-    )
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Vol", row=2, col=1)
 
     return fig
+
 
 
 # -------------------------
