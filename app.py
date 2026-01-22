@@ -7,18 +7,18 @@ from plotly.subplots import make_subplots
 # ----------------------------
 # Page Config
 # ----------------------------
-st.set_page_config(page_title="Trading Dashboard", layout="wide")
+st.set_page_config(page_title="Daily Trading Dashboard", layout="wide")
 
-st.title("📈 Multi-CSV Trading Dashboard (Clean + Interactive)")
-st.caption("Upload multiple OHLC CSVs → stacked charts → spikes + volatility → overlay comparison ⚡")
+st.title("📈 Daily Prices Dashboard (Clean + Trader Style)")
+st.caption("Upload daily OHLC CSVs → stacked charts → highlight daily moves + volatility + regime shifts ⚡")
 
 # ----------------------------
 # Sidebar
 # ----------------------------
-st.sidebar.header("⚙️ Dashboard Controls")
+st.sidebar.header("⚙️ Controls")
 
 uploaded_files = st.sidebar.file_uploader(
-    "Upload one or more CSV files",
+    "Upload one or more DAILY CSV files",
     type=["csv"],
     accept_multiple_files=True
 )
@@ -28,16 +28,40 @@ chart_mode = st.sidebar.selectbox(
     ["Close Line (Clean)", "Candlestick + Close", "Candlestick Only"]
 )
 
-rolling_window = st.sidebar.slider("Smooth Close (Rolling Window)", 1, 50, 5)
-spike_threshold = st.sidebar.slider("Spike Detection (Z-score)", 1.0, 8.0, 3.5, 0.1)
-vol_window = st.sidebar.slider("Volatility Window", 5, 60, 20)
+resample_tf = st.sidebar.selectbox(
+    "Resample Timeframe",
+    ["Daily", "Weekly", "Monthly"]
+)
 
-st.sidebar.markdown("---")
-compare_overlay = st.sidebar.checkbox("Overlay Compare All Closes", False)
+rolling_window = st.sidebar.slider("Smooth Close (Rolling)", 1, 50, 7)
+vol_window = st.sidebar.slider("Volatility Window (days)", 5, 60, 20)
+
+big_move_threshold = st.sidebar.slider("Big Move Threshold (% change)", 0.1, 10.0, 2.0, 0.1)
+
+show_change_bars = st.sidebar.checkbox("Show Daily Change Bars (Δ Close)", True)
+overlay_compare = st.sidebar.checkbox("Overlay Compare All Closes", False)
 
 # ----------------------------
-# Helper: Load & Clean CSV
+# Helpers
 # ----------------------------
+def resample_ohlc(df, tf):
+    """Resample OHLC to Weekly/Monthly while keeping OHLC logic correct."""
+    if tf == "Daily":
+        return df
+
+    rule = "W" if tf == "Weekly" else "M"
+
+    df = df.set_index("date")
+    out = pd.DataFrame()
+    out["open"] = df["open"].resample(rule).first()
+    out["high"] = df["high"].resample(rule).max()
+    out["low"] = df["low"].resample(rule).min()
+    out["close"] = df["close"].resample(rule).last()
+
+    out = out.dropna().reset_index()
+    return out
+
+
 def load_and_clean_csv(file):
     df = pd.read_csv(file)
 
@@ -54,37 +78,27 @@ def load_and_clean_csv(file):
 
     df = df.dropna(subset=["open", "high", "low", "close"])
 
+    # Resample if needed
+    df = resample_ohlc(df, resample_tf)
+
     # Features
-    df["delta"] = df["close"].diff()
+    df["delta_close"] = df["close"].diff()
     df["return_pct"] = df["close"].pct_change() * 100
-
-    # Smooth close
     df["close_smooth"] = df["close"].rolling(rolling_window).mean()
-
-    # Volatility
-    df["vol_heat"] = df["return_pct"].rolling(vol_window).std()
-
-    # Z-score spikes
-    std = df["delta"].std()
-    if std and std != 0:
-        df["z"] = (df["delta"] - df["delta"].mean()) / std
-    else:
-        df["z"] = 0
+    df["volatility"] = df["return_pct"].rolling(vol_window).std()
 
     return df
 
-# ----------------------------
-# Helper: Chart Builder
-# ----------------------------
-def make_chart(df, title):
+
+def make_daily_chart(df, title):
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=3, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.06,
-        row_heights=[0.75, 0.25]
+        vertical_spacing=0.05,
+        row_heights=[0.60, 0.20, 0.20]
     )
 
-    # ---- PRICE CHART (Row 1) ----
+    # ---------------- Row 1: Price ----------------
     if chart_mode in ["Candlestick + Close", "Candlestick Only"]:
         fig.add_trace(
             go.Candlestick(
@@ -111,7 +125,6 @@ def make_chart(df, title):
             row=1, col=1
         )
 
-    # Smooth line
     if rolling_window > 1:
         fig.add_trace(
             go.Scatter(
@@ -125,38 +138,51 @@ def make_chart(df, title):
             row=1, col=1
         )
 
-    # Spike markers (only important points)
-    spikes = df[np.abs(df["z"]) >= spike_threshold]
-    if len(spikes) > 0:
+    # Big move markers
+    big_moves = df[df["return_pct"].abs() >= big_move_threshold]
+    if len(big_moves) > 0:
         fig.add_trace(
             go.Scatter(
-                x=spikes["date"],
-                y=spikes["close"],
+                x=big_moves["date"],
+                y=big_moves["close"],
                 mode="markers",
-                name=f"Spikes (Z≥{spike_threshold})",
-                marker=dict(size=7, symbol="circle"),
-                hovertemplate="SPIKE<br>Date=%{x}<br>Close=%{y}<extra></extra>"
+                name=f"Big Moves (≥{big_move_threshold}%)",
+                marker=dict(size=7, symbol="diamond"),
+                hovertemplate="BIG MOVE<br>Date=%{x}<br>Close=%{y}<extra></extra>"
             ),
             row=1, col=1
         )
 
-    # ---- VOLATILITY PANEL (Row 2) ----
+    # ---------------- Row 2: Δ Close bars ----------------
+    if show_change_bars:
+        colors = np.where(df["delta_close"] >= 0, 1, -1)
+        fig.add_trace(
+            go.Bar(
+                x=df["date"],
+                y=df["delta_close"].fillna(0),
+                name="Δ Close",
+                opacity=0.45,
+                hovertemplate="Date=%{x}<br>Δ Close=%{y}<extra></extra>"
+            ),
+            row=2, col=1
+        )
+
+    # ---------------- Row 3: Volatility ----------------
     fig.add_trace(
         go.Scatter(
             x=df["date"],
-            y=df["vol_heat"].fillna(0),
+            y=df["volatility"].fillna(0),
             mode="lines",
-            name=f"Volatility({vol_window})",
+            name=f"Vol({vol_window})",
             line=dict(width=1),
             hovertemplate="Vol=%{y}<extra></extra>"
         ),
-        row=2, col=1
+        row=3, col=1
     )
 
-    # Layout
     fig.update_layout(
         title=title,
-        height=560,
+        height=680,
         margin=dict(l=10, r=10, t=50, b=10),
         hovermode="x unified",
         xaxis_rangeslider_visible=False,
@@ -164,40 +190,41 @@ def make_chart(df, title):
     )
 
     fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="Vol", row=2, col=1)
+    fig.update_yaxes(title_text="Δ Close", row=2, col=1)
+    fig.update_yaxes(title_text="Vol", row=3, col=1)
 
     return fig
 
+
 # ----------------------------
-# Main App
+# Main
 # ----------------------------
 if not uploaded_files:
-    st.info("⬅️ Upload CSV files from the sidebar (must have: date, open, high, low, close)")
+    st.info("⬅️ Upload daily OHLC CSVs (date, open, high, low, close)")
     st.stop()
 
-dfs = []
-names = []
+dfs, names = [], []
 
 for f in uploaded_files:
     df = load_and_clean_csv(f)
-    if df is not None and len(df) > 5:
+    if df is not None and len(df) > 10:
         dfs.append(df)
         names.append(f.name)
 
 if not dfs:
-    st.warning("No valid datasets loaded.")
+    st.warning("No valid daily datasets loaded.")
     st.stop()
 
 # ----------------------------
-# Summary Table
+# Summary
 # ----------------------------
-st.subheader("📌 Quick Summary")
+st.subheader("📌 Quick Summary (Daily)")
 
 summary_rows = []
 for name, df in zip(names, dfs):
     last_close = df["close"].iloc[-1]
     last_ret = df["return_pct"].iloc[-1] if not np.isnan(df["return_pct"].iloc[-1]) else 0
-    max_spike = df["z"].abs().max()
+    max_abs_ret = df["return_pct"].abs().max()
 
     summary_rows.append({
         "File": name,
@@ -206,7 +233,7 @@ for name, df in zip(names, dfs):
         "End": df["date"].max(),
         "Last Close": float(last_close),
         "Last %Change": float(last_ret),
-        "Max Spike (Z)": float(max_spike),
+        "Max |%Change|": float(max_abs_ret),
     })
 
 summary_df = pd.DataFrame(summary_rows)
@@ -215,41 +242,38 @@ st.dataframe(summary_df, use_container_width=True)
 st.markdown("---")
 
 # ----------------------------
-# Stacked Charts
+# Stacked charts
 # ----------------------------
-st.subheader("📊 Stacked Charts (Top → Bottom)")
+st.subheader("📊 Stacked Daily Charts (Top → Bottom)")
 
 for name, df in zip(names, dfs):
     left, right = st.columns([4.5, 1.5])
 
     with left:
-        fig = make_chart(df, f"📈 {name}")
+        fig = make_daily_chart(df, f"📈 {name} ({resample_tf})")
         st.plotly_chart(fig, use_container_width=True)
 
     with right:
-        st.markdown("### ⚡ Live Stats")
+        st.markdown("### ⚡ Stats")
 
         last_close = df["close"].iloc[-1]
         last_ret = df["return_pct"].iloc[-1] if not np.isnan(df["return_pct"].iloc[-1]) else 0
-        max_spike = df["z"].abs().max()
 
         st.metric("Last Close", f"{last_close:.6f}")
         st.metric("Last %Change", f"{last_ret:.2f}%")
-        st.metric("Max Spike (Z)", f"{max_spike:.2f}")
 
-        # Biggest move row
-        biggest = df.loc[df["delta"].abs().idxmax()]
-        st.markdown("#### 💥 Biggest Move")
+        biggest = df.loc[df["return_pct"].abs().idxmax()]
+        st.markdown("#### 💥 Biggest Day")
         st.write(f"📅 {biggest['date']}")
-        st.write(f"Δ Close: {biggest['delta']:.6f}")
+        st.write(f"% Change: {biggest['return_pct']:.2f}%")
         st.write(f"Close: {biggest['close']:.6f}")
 
 st.markdown("---")
 
 # ----------------------------
-# Overlay Compare Mode
+# Overlay compare
 # ----------------------------
-if compare_overlay:
+if overlay_compare:
     st.subheader("🧠 Overlay Compare (All Closes)")
 
     fig2 = go.Figure()
@@ -262,7 +286,7 @@ if compare_overlay:
         ))
 
     fig2.update_layout(
-        title="Overlay Close Comparison",
+        title=f"Overlay Close Comparison ({resample_tf})",
         height=550,
         hovermode="x unified",
         xaxis=dict(rangeslider=dict(visible=True))
@@ -270,4 +294,4 @@ if compare_overlay:
 
     st.plotly_chart(fig2, use_container_width=True)
 
-st.success("✅ Dashboard loaded successfully. Upload more CSVs anytime.")
+st.success("✅ Daily dashboard loaded. Upload more files anytime.")
